@@ -74,9 +74,9 @@ const store = {
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} },
   del(k) { try { localStorage.removeItem(k); } catch (e) {} },
 };
-const COL = { swim: '#38bdf8', bike: '#f5c542', run: '#2fbf71', other: '#8b93a3' };
-const LBL = { swim: 'P', bike: 'R', run: 'B', other: '·' };
-const NAMES = { swim: 'Pływanie', bike: 'Rower', run: 'Bieg', other: 'Inne' };
+const COL = { swim: '#38bdf8', bike: '#f5c542', run: '#2fbf71', multi: '#a78bfa', other: '#8b93a3' };
+const LBL = { swim: 'P', bike: 'R', run: 'B', multi: 'T', other: '·' };
+const NAMES = { swim: 'Pływanie', bike: 'Rower', run: 'Bieg', multi: 'Triathlon', other: 'Inne' };
 const GH_PATH = 'triathlon/data/';
 
 let set = Object.assign({}, T.DEFAULTS, store.get('tri_set', {}));
@@ -102,7 +102,7 @@ async function loadData(manual) {
 }
 
 function compute() {
-  acts = (raw.activities || []).map(T.normalize);
+  acts = T.dedupe((raw.activities || []).map(T.normalize));
   series = T.pmc(acts, set, today());
   wellness = (raw.wellness || []).slice().sort((a, b) => a.date.localeCompare(b.date));
 }
@@ -223,7 +223,7 @@ const views = {
     const s = lastN(series, 90), wk = lastN(T.weekly(acts, set), 12);
     return `<div class="card"><h2>Performance Management Chart</h2><canvas id="c-pmc"></canvas>${legend([[COL_CTL, 'CTL'], [COL_ATL, 'ATL'], [COL_TSB, 'TSB']])}
       <p class="mut" style="margin:8px 0 0">CTL = średnie obciążenie z 42 dni, ATL = z 7 dni, TSB = CTL − ATL. TSS jest szacowany z progów w Ustawieniach.</p></div>
-    <div class="card"><h2>Godziny tygodniowo</h2><canvas id="c-wk"></canvas>${legend([[COL.swim, 'pływanie'], [COL.bike, 'rower'], [COL.run, 'bieg']])}</div>
+    <div class="card"><h2>Godziny tygodniowo</h2><canvas id="c-wk"></canvas>${legend([[COL.swim, 'pływanie'], [COL.bike, 'rower'], [COL.run, 'bieg'], [COL.multi, 'start']])}</div>
     <div class="card"><h2>Tygodnie</h2><table><tr><th>Tydzień</th><th>h</th><th>TSS</th><th>Pływ. km</th><th>Rower km</th><th>Bieg km</th></tr>
       ${wk.slice().reverse().map(w => `<tr><td>${short(w.week)}</td><td>${f1(w.hours)}</td><td>${Math.round(w.tss)}</td><td>${f1(w.dist.swim / 1000)}</td><td>${f1(w.dist.bike / 1000)}</td><td>${f1(w.dist.run / 1000)}</td></tr>`).join('')}</table></div>`;
   },
@@ -248,11 +248,14 @@ const views = {
       const f = T.forecast(last, wtss, days), r = f[f.length - 1];
       fc = `<p style="margin:10px 0 0">W dniu startu przy <b>${wtss} TSS/tydz.</b>: CTL <b>${Math.round(r.ctl)}</b>, ATL ${Math.round(r.atl)}, TSB <b>${Math.round(r.tsb)}</b>. <span class="mut">Taper (np. −40% przez ostatnie 10 dni) podniesie TSB.</span></p>`;
     }
-    const tri = e.tri;
-    return `<div class="card"><h2>Biegi – szacunek z Riegela</h2>${e.run ? `<div class="grid">${kpi(T.fmtTime(e.run.t5), '5 km')}${kpi(T.fmtTime(e.run.t10), '10 km')}${kpi(T.fmtTime(e.run.thm), 'półmaraton')}${kpi(T.fmtTime(e.run.tm), 'maraton')}</div>
+    const tri = e.tri, rc = T.races(acts);
+    const raceCard = rc.length ? `<div class="card"><h2>Twoje starty</h2>${rc.map(r => `<div class="act"><div class="ic" style="background:${COL.multi}">T</div><div style="min-width:0"><div class="n">${esc(r.act.name)}</div><div class="m">${r.act.date} · ${r.kind === 'IM' ? 'pełny dystans' : '70.3'} · ${f1(r.act.dist / 1000)} km</div></div><div class="t">${T.fmtTime(r.act.dur)}<small>czas</small></div></div>`).join('')}</div>` : '';
+    const cal = tri && tri.calibration, cr = cal && series.find(x => x.d === cal.date), cn = series[series.length - 1];
+    const formNote = cr && cn && cn.ctl < cr.ctl * 0.85 ? `Uwaga: to forma z okresu startowego (CTL ${Math.round(cr.ctl)}, teraz ${Math.round(cn.ctl)}), więc dziś wynik byłby wyraźnie słabszy. ` : '';
+    return raceCard + `<div class="card"><h2>Biegi – szacunek z Riegela</h2>${e.run ? `<div class="grid">${kpi(T.fmtTime(e.run.t5), '5 km')}${kpi(T.fmtTime(e.run.t10), '10 km')}${kpi(T.fmtTime(e.run.thm), 'półmaraton')}${kpi(T.fmtTime(e.run.tm), 'maraton')}</div>
       <p class="mut" style="margin:10px 0 0">Na podstawie najlepszego wysiłku z 120 dni: ${esc(e.run.base.name || 'bieg')} (${e.run.base.date}, ${f1(e.run.base.dist / 1000)} km w ${T.fmtTime(e.run.base.dur)}). Trening w spokojnym tempie zaniża wynik.</p>` : '<p class="mut">Za mało danych biegowych (potrzeba biegu ≥ 3 km i ≥ 15 min w ostatnich 120 dniach).</p>'}</div>
     <div class="card"><h2>Ironman 70.3 – orientacyjnie</h2>${tri ? `<div class="grid">${kpi(T.fmtTime(tri.swim), 'pływanie 1,9 km', `<small class="mut">${T.fmtPace(tri.swimPace)}/100 m</small>`)}${kpi(T.fmtTime(tri.bike), 'rower 90 km', `<small class="mut">${f1(tri.bikeKmh)} km/h</small>`)}${kpi(T.fmtTime(tri.run), 'bieg 21,1 km')}${kpi(T.fmtTime(tri.total), 'razem (+T1/T2 5 min)')}</div>
-      <p class="mut" style="margin:10px 0 0">Pływanie z CSS (lub najlepszych 25% basenów) +4%, rower z szybszych jazd ≥ 40 km −3%, bieg to półmaraton +8% za zmęczenie po rowerze. To szacunek, a nie prognoza wyścigu: nie uwzględnia warunków, trasy ani żywienia.</p>` : '<p class="mut">Potrzebne dane ze wszystkich trzech dyscyplin (pływanie ≥ 400 m, jazda ≥ 40 km, bieg ≥ 3 km).</p>'}</div>
+      <p class="mut" style="margin:10px 0 0">${tri.calibration ? `Skalibrowane do Twojego startu ${tri.calibration.date} (wynik ${T.fmtTime(tri.calibration.actual)}, sam model dawał ${T.fmtTime(tri.calibration.model)}${tri.calibration.perLeg ? '' : ', bez podziału na etapy'}). ` : ''}${formNote}Model: pływanie z CSS (lub najlepszych 25% basenów) +4%, rower z szybszych jazd ≥ 40 km −3%, bieg to półmaraton +8%. To szacunek, a nie prognoza wyścigu: nie uwzględnia warunków, trasy ani żywienia.</p>` : '<p class="mut">Potrzebne dane ze wszystkich trzech dyscyplin (pływanie ≥ 400 m, jazda ≥ 40 km, bieg ≥ 3 km).</p>'}</div>
     <div class="card"><h2>Prognoza formy na start</h2>
       <label>Data startu</label><input type="date" id="race" value="${esc(set.raceDate)}">
       <label>Tygodniowy TSS do prognozy: <b id="wv">${wtss}</b></label><input type="range" id="wt" min="100" max="1000" step="10" value="${wtss}">
@@ -280,7 +283,7 @@ const charts = {
     const s = lastN(series, 90), lb = s.map(x => short(x.d));
     lineChart($('#c-pmc'), lb, [{ v: s.map(x => x.ctl), color: COL_CTL, w: 2.5 }, { v: s.map(x => x.atl), color: COL_ATL }, { v: s.map(x => x.tsb), color: COL_TSB }]);
     const wk = lastN(T.weekly(acts, set), 12);
-    barChart($('#c-wk'), wk.map(w => short(w.week)), [{ v: wk.map(w => w.swim), color: COL.swim }, { v: wk.map(w => w.bike), color: COL.bike }, { v: wk.map(w => w.run), color: COL.run }]);
+    barChart($('#c-wk'), wk.map(w => short(w.week)), [{ v: wk.map(w => w.swim), color: COL.swim }, { v: wk.map(w => w.bike), color: COL.bike }, { v: wk.map(w => w.run), color: COL.run }, { v: wk.map(w => w.multi), color: COL.multi }]);
   },
   rec() {
     const w = lastN(wellness, 60), lb = w.map(x => short(x.date)), h = w.map(x => x.hrv);

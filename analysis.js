@@ -20,6 +20,7 @@
 
   function sportOf(typeKey) {
     const t = (typeKey || '').toLowerCase();
+    if (/multi/.test(t)) return 'multi';   // start multisport (triathlon) nagrany jako jedna aktywność
     if (/swim/.test(t)) return 'swim';
     if (/cycl|bik|ride/.test(t)) return 'bike';
     if (/run|trail/.test(t)) return 'run';
@@ -29,7 +30,7 @@
   // Normalizuje surową aktywność z garmin.json do postaci używanej w analizach.
   function normalize(a) {
     return {
-      id: a.id, date: String(a.date).slice(0, 10), name: a.name || '',
+      id: a.id, date: String(a.date).slice(0, 10), start: Date.parse(String(a.date).replace(' ', 'T')), legs: a.legs || null, name: a.name || '',
       sport: sportOf(a.type), type: a.type,
       dur: a.dur || 0, dist: a.dist || 0, hr: a.hr || 0, maxHr: a.maxHr || 0,
       np: a.np || a.pwr || 0, elev: a.elev || 0, te: a.te || 0, load: a.load || 0,
@@ -41,6 +42,8 @@
     s = Object.assign({}, DEFAULTS, s);
     const h = a.dur / 3600;
     if (!h) return 0;
+    // Multisport z Garmina nie ma tętna ani mocy: IF maleje z długością startu (~0,79 dla 70.3, ~0,68 dla pełnego dystansu).
+    if (a.sport === 'multi') { const IF = Math.max(0.6, Math.min(0.85, 0.87 - 0.015 * h)); return h * IF * IF * 100; }
     let v = null;
     if (a.sport === 'bike' && a.np && s.ftp) {
       const IF = a.np / s.ftp; v = h * IF * IF * 100;
@@ -80,7 +83,7 @@
     const w = {};
     acts.forEach(a => {
       const k = weekStart(a.date);
-      const o = w[k] || (w[k] = { week: k, tss: 0, hours: 0, swim: 0, bike: 0, run: 0, other: 0, dist: { swim: 0, bike: 0, run: 0 } });
+      const o = w[k] || (w[k] = { week: k, tss: 0, hours: 0, swim: 0, bike: 0, run: 0, multi: 0, other: 0, dist: { swim: 0, bike: 0, run: 0 } });
       const t = tss(a, s);
       o.tss += t; o.hours += a.dur / 3600; o[a.sport] += a.dur / 3600;
       if (o.dist[a.sport] != null) o.dist[a.sport] += a.dist;
@@ -128,7 +131,7 @@
   }
 
   // Szacunki czasów: biegi z Riegela, 70.3 z CSS/tempa pływackiego, średniej prędkości rowerowej i biegu po rowerze.
-  function estimates(acts, s, nowKey) {
+  function estimatesRaw(acts, s, nowKey) {
     s = Object.assign({}, DEFAULTS, s);
     const out = { run: null, tri: null };
     const br = bestRun(acts, nowKey, 120);
@@ -168,6 +171,41 @@
   };
   const fmtPace = sec => `${Math.floor(sec / 60)}:${pad(Math.round(sec % 60) % 60)}`;
 
-  const api = { DEFAULTS, dkey, parse, addDays, daysBetween, sportOf, normalize, tss, pmc, weekStart, weekly, rampRate, formState, forecast, riegel, bestRun, estimates, trend, fmtTime, fmtPace };
+  // Etapy składowe (swim/bike/run) jako części multisportu są już ujęte w aktywności nadrzędnej – pomijamy je, by nie liczyć dwa razy.
+  function dedupe(acts) {
+    const multi = acts.filter(a => a.sport === 'multi');
+    return acts.filter(a => a.sport === 'multi' || !multi.some(m => a.start >= m.start - 6e4 && a.start < m.start + m.dur * 1000));
+  }
+
+  // Starty: multisport o dystansie 70.3 (95–130 km) lub pełnym (200–250 km).
+  function races(acts) {
+    return acts.filter(a => a.sport === 'multi').map(a => {
+      const km = a.dist / 1000;
+      return { act: a, kind: km >= 95 && km <= 130 ? '70.3' : km >= 200 && km <= 250 ? 'IM' : null };
+    }).filter(r => r.kind).sort((x, y) => y.act.start - x.act.start);
+  }
+
+  const legSum = (legs, sport) => (legs || []).filter(l => sportOf(l.type) === sport).reduce((p, l) => p + (l.dur || 0), 0);
+  const clampK = k => Math.max(0.6, Math.min(1.15, k));
+
+  // Szacunek 70.3 skalibrowany do ostatniego prawdziwego startu na tym dystansie:
+  // porównujemy, co model przewidziałby w dniu startu, z faktycznym wynikiem (osobno dla etapów, gdy są zapisane).
+  function estimates(acts, s, nowKey) {
+    const out = estimatesRaw(acts, s, nowKey), race = races(acts).find(r => r.kind === '70.3');
+    if (!out.tri || !race) return out;
+    const before = estimatesRaw(acts.filter(a => a.date < race.act.date), s, race.act.date).tri;
+    if (!before) return out;
+    const L = race.act.legs, aS = legSum(L, 'swim'), aB = legSum(L, 'bike'), aR = legSum(L, 'run');
+    const perLeg = aS && aB && aR;
+    const kS = clampK(perLeg ? aS / before.swim : race.act.dur / before.total);
+    const kB = clampK(perLeg ? aB / before.bike : race.act.dur / before.total);
+    const kR = clampK(perLeg ? aR / before.run : race.act.dur / before.total);
+    const t = out.tri, swim = t.swim * kS, bike = t.bike * kB, run = t.run * kR;
+    out.tri = Object.assign({}, t, { swim, bike, run, total: swim + bike + run + t.trans, bikeKmh: t.bikeKmh / kB, swimPace: t.swimPace * kS,
+      calibration: { date: race.act.date, actual: race.act.dur, model: before.total, perLeg: !!perLeg } });
+    return out;
+  }
+
+  const api = { dedupe, races, DEFAULTS, dkey, parse, addDays, daysBetween, sportOf, normalize, tss, pmc, weekStart, weekly, rampRate, formState, forecast, riegel, bestRun, estimates, trend, fmtTime, fmtPace };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.Tri = api;
 })(typeof window !== 'undefined' ? window : globalThis);
