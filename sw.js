@@ -1,5 +1,5 @@
 // Network-first: aktualizacje wchodzą od razu, a offline działa z cache.
-const CACHE = 'triathlon-v1';
+const CACHE = 'triathlon-v2';
 const FILES = ['./', 'index.html', 'analysis.js', 'demo.js', 'manifest.json', 'icon-180.png', 'icon-512.png'];
 
 self.addEventListener('install', e => {
